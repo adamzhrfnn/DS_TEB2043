@@ -1,66 +1,64 @@
-# Load necessary libraries
-# install.packages(c("dplyr", "stringr", "lubridate")) # Uncomment if not installed
-library(dplyr)
-library(stringr)
+# 1. Setup - Install and load necessary libraries
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("janitor")) install.packages("janitor")
+library(tidyverse)
+library(janitor)
 library(lubridate)
 
-# 1. Load the data
-# We use sep = "|" because the file uses pipes. 
-# We strip.white = TRUE to remove initial leading/trailing spaces during import.
-raw_data <- read.csv("UncleanDataset.csv", 
-                     sep = "|", 
-                     header = TRUE, 
-                     strip.white = TRUE, 
-                     stringsAsFactors = FALSE,
-                     comment.char = "")
+# 2. READ AND UNIFY DELIMITERS
+# Because the file mixes pipes and commas, we read it as text lines first.
+raw_lines <- readLines("UncleanDataset.csv")
 
-# 2. Clean Column Names
-# Remove trailing commas from the last column name and trim whitespace
-colnames(raw_data) <- colnames(raw_data) %>%
-  str_remove_all(",") %>%
-  str_trim() %>%
-  str_replace_all(" ", "_")
+clean_lines <- raw_lines %>%
+  str_replace_all("\\|", ",") %>% # Replace pipes with commas 
+  str_replace_all(",+", ",") %>%  # Collapse multiple commas into one [cite: 4, 11]
+  str_replace_all(",$", "")       # Remove trailing commas at end of lines [cite: 6, 8]
 
-# 3. Clean the Data Rows
-clean_df <- raw_data %>%
-  # Apply whitespace trimming to all character columns
-  mutate(across(where(is.character), str_trim)) %>%
-  
-  # Remove trailing commas and dots from the last column (Total_Payments)
-  mutate(Total_Payments = str_remove_all(Total_Payments, "[,.]+")) %>%
-  
-  # A. Standardize Gender (Example: Male -> M, Female -> F)
-  mutate(Gender = case_when(
-    tolower(Gender) %in% c("m", "male") ~ "M",
-    tolower(Gender) %in% c("f", "female") ~ "F",
-    TRUE ~ Gender # Keeps original if it doesn't match
-  )) %>%
-  
-  # B. Standardize Total_Payments (Remove '$' and convert to numeric)
-  mutate(Total_Payments = str_remove(Total_Payments, "\\$"),
-         Total_Payments = as.numeric(Total_Payments)) %>%
-  
-  # C. Standardize Date Format (Change to dd/mm/yyyy)
-  # First parse the current YYYY-MM-DD format, then reformat it
-  mutate(Enrollment_Date = ymd(Enrollment_Date),
-         Enrollment_Date = format(Enrollment_Date, "%d/%m/%Y")) %>%
-  
-  # D. Fix Truncated Course Names (Optional cleanup based on your data)
-  mutate(Course = case_when(
-    Course == "Machine Learnin" ~ "Machine Learning",
-    Course == "Web Developmen" ~ "Web Development",
-    TRUE ~ Course
-  ))
+# Convert the cleaned text lines into a data frame
+df <- read_csv(paste(clean_lines, collapse = "\n"), show_col_types = FALSE)
 
-# 4. Handle Missing Values
-# Replacing "NA" strings created by formatting back to actual R NA values
-clean_df[clean_df == "NA" | clean_df == ""] <- NA
+# 3. INITIAL CLEANING WITH JANITOR
+df_clean <- df %>%
+  clean_names() %>%            # Standardize column names (e.g., total_payments) [cite: 1]
+  remove_empty(which = c("rows", "cols")) %>% # Remove completely blank rows/cols [cite: 242]
+  distinct()                   # Remove exact duplicate rows [cite: 39-46, 154]
 
-# 5. Save the Cleaned Dataset
-write.csv(clean_df, "Cleaned_UncleanDataset.csv", row.names = FALSE)
+# 4. DATA TRANSFORMATION AND FORMATTING
+df_clean <- df_clean %>%
+  mutate(
+    # Clean Payments: Remove $, £, ?, and commas, then convert to numeric 
+    total_payments = as.numeric(str_remove_all(total_payments, "[\\$,£\\? ]")),
+    
+    # Clean Age: Extract only digits (removes '*' or extra text) [cite: 83, 243, 248]
+    age = as.numeric(str_extract(age, "\\d+")),
+    
+    # Clean Gender: Standardize to single character 'M' or 'F' [cite: 3, 243, 245]
+    gender = toupper(str_sub(str_trim(gender), 1, 1)),
+    
+    # Standardize Dates: Handle multiple formats (YYYY-MM-DD and DD-Mon-YY) [cite: 3, 243, 249]
+    enrollment_date = parse_date_time(enrollment_date, orders = c("ymd", "dmy", "d-b-y")),
+    
+    # Fix Truncated Course Names [cite: 5, 12, 19, 250]
+    course = case_when(
+      str_detect(course, "Machine") ~ "Machine Learning",
+      str_detect(course, "Web Devel") ~ "Web Development",
+      str_detect(course, "Data Sci|Data Ana") ~ "Data Science",
+      str_detect(course, "Cyber") ~ "Cyber Security",
+      TRUE ~ course
+    )
+  )
 
-# Print Summary to Console
-cat("Cleaning Complete!\n")
-cat("Original Rows:", nrow(raw_data), "\n")
-cat("Cleaned file saved as: Cleaned_UncleanDataset.csv\n\n")
-print(head(clean_df))
+# 5. REMOVING OUTLIERS
+# Removing extreme ages (e.g., age 4 or 78) and extreme payments [cite: 248, 252]
+df_final <- df_clean %>%
+  filter(
+    age >= 16 & age <= 65,      # Filter out non-student ages like 4 or 78 [cite: 248, 252]
+    total_payments < 1000000,   # Remove extreme payment outliers [cite: 249, 253]
+    !is.na(student_id)          # Ensure Student_ID exists
+  )
+
+# 6. EXPORT CLEAN DATA
+write_csv(df_final, "CleanDataset.csv")
+
+print("Data cleaning complete! 'CleanDataset.csv' is ready.")
+
